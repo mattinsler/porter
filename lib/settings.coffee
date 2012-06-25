@@ -27,6 +27,13 @@ exports.redis = {
     exports.redis.__client__ = client
 }
 
+exports.worker = {
+  queues: null
+  min_poll_timeout: 100
+  max_poll_timeout: 5000
+  concurrent_commands: 1
+}
+
 exports.RedisPayloadStorage = require './redis_payload_storage'
 
 exports.payload_storage = exports.RedisPayloadStorage

@@ -23,4 +23,4 @@ if (argv.n) {
 	porter.settings.namespace = argv.n;
 }
 
-new porter.Reaper(argv.i).start();
+return new porter.Reaper(argv.i).start();

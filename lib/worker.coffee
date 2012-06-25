@@ -1,7 +1,11 @@
 _ = require 'underscore'
+async = require 'async'
 child_process = require 'child_process'
 {EventEmitter} = require 'events'
-Queue = require('../index').Queue
+Queue = require './queue'
+settings = require './settings'
+
+create_client = settings.redis.create_client
 
 log = ->
   arguments[0] = "[Worker #{process.pid}] #{arguments[0]}"
@@ -28,50 +32,63 @@ class Worker extends EventEmitter
     o["#{queue}:#{command}"] = func
     @registry.register(o)
   
-  constructor: (@config = {}) ->
-    @queue_cache = {}
-    Object.defineProperty @config, 'queues', {get: -> Worker.registry.queues()} unless @config.queues?
+  constructor: (options = {}) ->
+    @_is_child = process.send?
     
-    @config.min_timeout ||= 100
-    @config.max_timeout ||= 5000
-    @config.concurrent_commands ||= 1
-    @config.queue_config = {}
-    @config.queue_config.payload_storage = @config.payload_storage if @config.payload_storage?
-    @config.queue_config.timeout = @config.timeout if @config.timeout?
-    delete @config.payload_storage
-    
-    @current_queue = 0
-    @current_commands = {}
-    @current_timeout = config.min_timeout
-    
-    @_should_run = true
-    
-    @child_workers = []
-    
-    done = _.after @config.concurrent_commands, =>
-      @initialized = true
+    @_queue_cache = {}
+    @_queues = options.queues || settings.queues
+    Object.defineProperty @, '_queues', {get: -> Worker.registry.queues()} unless @_queues?
 
-    for x in _.range(@config.concurrent_commands)
-      do (x) =>
-        child = child_process.fork(process.argv[1], ['run', 'lib/queue_worker_child.coffee'], {cwd: '.', env: process.env})
-        child.on 'message', (msg) =>
-          if msg.status is 'ready'
-            @child_workers.push(child)
-            done()
+    @_min_poll_timeout = options.min_poll_timeout || settings.worker.min_poll_timeout
+    @_max_poll_timeout = options.max_poll_timeout || settings.worker.max_poll_timeout
+    @_concurrent_commands = options.concurrent_commands || settings.worker.concurrent_commands
+
+    @_timeout = options.timeout || settings.timeout
+    
+    @_current_queue = 0
+    @_current_commands = {}
+    @_current_poll_timeout = @_min_poll_timeout
+
+    @_state = 'uninitialized'
+    
+    @_child_workers = []
+  
+  initialize: (callback) ->
+    return unless @_state is 'uninitialized'
+    @_state = 'initializing'
+    @emit @_state
+    
+    async.map _.range(@_concurrent_commands), (idx, cb) ->
+      start_child = (command, args) ->
+        log "Starting child #{command} #{args}"
+        child = child_process.fork(command, args, {cwd: '.', env: process.env})
+        child.on 'message', (msg) ->
+          cb(null, child) if msg.status is 'ready'
+      
+      if process.argv[0] is 'node'
+        start_child(process.argv[1], process.argv.slice(2))
+      else if process.argv[0] is 'coffee'
+        start_child(process.argv[1], process.argv.slice(2))
+    , (err, children) =>
+      return callback(err) if err?
+      @_child_workers = children
+      @_state = 'initialized'
+      callback()
+      @emit @_state
   
   next_queue: ->
-    queues = @config.queues
-    @current_queue = (@current_queue + 1) % queues.length
-    queue_name = queues[@current_queue]
-    @queue_cache[queue_name] ||= new JobQueue(queues[@current_queue], @config.queue_config)
+    queues = @_queues
+    @_current_queue = (@_current_queue + 1) % queues.length
+    queue_name = queues[@_current_queue]
+    @_queue_cache[queue_name] ||= new Queue(queues[@current_queue])
   
   increase_timeout: ->
-    c = Math.max(@current_timeout, @config.min_timeout)
-    @current_timeout = Math.min(@config.max_timeout, c * 4 / 3)
+    c = Math.max(@_current_poll_timeout, @_min_poll_timeout)
+    @_current_poll_timeout = Math.min(@_max_poll_timeout, c * 4 / 3)
     c
 
   reset_timeout: ->
-    @current_timeout = 1
+    @_current_poll_timeout = 1
   
   process_command: (envelope) ->
     @reset_timeout()
@@ -79,22 +96,22 @@ class Worker extends EventEmitter
     command = Worker.registry.get(envelope.command)
     return @error("Unknown command: #{envelope.command}", envelope) unless command?
     
-    worker = @child_workers.shift()
+    worker = @_child_workers.shift()
 
     @emit 'log', "Processing #{envelope.command}", envelope
     status = {
       envelope: envelope
       worker: worker
     }
-    @current_commands[envelope.id] = status
+    @_current_commands[envelope.id] = status
     
     on_message = (msg) =>
       if msg.status is 'error'
-        @child_workers.push(status.worker)
+        @_child_workers.push(status.worker)
         @error(msg.error, envelope)
         # child.kill()
       else if msg.status is 'success'
-        @child_workers.push(status.worker)
+        @_child_workers.push(status.worker)
         @success(envelope)
         # child.kill()
     
@@ -102,21 +119,14 @@ class Worker extends EventEmitter
     
     log "Sending #{envelope.command} to worker #{status.worker.pid}"
     status.worker.send {command: envelope.command, opts: envelope.value}
-    
-    # try
-    #   command envelope.value, (err) =>
-    #     return @error(err, envelope) if err?
-    #     @success(envelope)
-    # catch e
-    #   @error(e, envelope)
 
   success: (envelope) ->
-    delete @current_commands[envelope.id]
+    delete @_current_commands[envelope.id]
     @emit 'success', {envelope: envelope}
     envelope.remove()
   
   error: (err, envelope) ->
-    delete @current_commands[envelope.id]
+    delete @_current_commands[envelope.id]
     if envelope?
       # possible retries here...
       envelope.remove()
@@ -129,13 +139,13 @@ class Worker extends EventEmitter
     @increase_timeout()
   
   ready_for_next: ->
-    Object.keys(@current_commands).length < @config.concurrent_commands and @child_workers.length > 0
+    Object.keys(@_current_commands).length < @_concurrent_commands and @_child_workers.length > 0
   
   next: (timeout) ->
-    setTimeout((=> @work()), timeout || @current_timeout)
+    setTimeout((=> @work()), timeout || @_current_poll_timeout)
   
   work: ->
-    return unless @_should_run
+    return unless @_state is 'running'
     return @next(@increase_timeout()) unless @ready_for_next()
     
     @emit 'work'
@@ -149,16 +159,24 @@ class Worker extends EventEmitter
         @process_command(envelope)
       @next()
   
-  start: ->
-    unless @initialized
-      log 'Waiting for initialization' 
-      return setTimeout =>
-        @start()
-      , 1000
-    log "Initialized! Let's go!"
-    @next(1)
+  start: (callback) ->
+    return require('./worker_child') if @_is_child
+
+    switch @_state
+      when 'initialized' then process.nextTick(-> callback?())
+      when 'running' then process.nextTick(-> callback?())
+
+      when 'uninitialized'
+        log 'Waiting for initialization'
+        @initialize (err) =>
+          return callback?(err) if err?
+          log "Initialized! Let's go!"
+          process.nextTick(=> @next(1))
+          callback?()
+      when 'initializing'
+        @.once('initialized', -> callback?())
   
   stop: (callback) ->
-    @_should_run = false
+    @_state = 'stopping'
   
 module.exports = Worker
