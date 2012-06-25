@@ -1,0 +1,26 @@
+#!/usr/bin/env node
+
+var optimist = require('optimist')
+	.usage('Usage: $0 [options]')
+	.alias('h', 'help').describe('h',      'Show this little ditty')
+	.alias('r', 'redis').describe('r',     'Redis url              ex: redis://fake_user:password@host:port/')
+	.alias('i', 'interval').describe('i',  'Reap interval (in ms)  default: 5 seconds')
+	.alias('n', 'namespace').describe('n', 'Redis namespace        default: porter');
+
+var argv = optimist.argv;
+
+if (argv.h) {
+	return optimist.showHelp();
+}
+
+var porter = require('../index');
+
+if (argv.r) {
+	porter.settings.redis.url = argv.r;
+}
+
+if (argv.n) {
+	porter.settings.namespace = argv.n;
+}
+
+new porter.Reaper(argv.i).start();
