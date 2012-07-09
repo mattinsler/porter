@@ -1,15 +1,30 @@
 _ = require 'underscore'
+os = require 'os'
 async = require 'async'
+procinfo = require 'procinfo'
 child_process = require 'child_process'
 {EventEmitter} = require 'events'
+
 Queue = require './queue'
 settings = require './settings'
-
+WorkerHeartbeat = require './worker_heartbeat'
 create_client = settings.redis.create_client
 
 log = ->
   arguments[0] = "[Worker #{process.pid}] #{arguments[0]}"
   console.log.apply(console, arguments)
+  
+pretty_mem = (value) ->
+  "#{Math.floor(100 * value / (1024 * 1024)) / 100} MB"
+  
+flatten_object = (obj, into = {}, prefix = '', sep = '_') ->
+  for own key, prop of obj
+    if typeof prop is 'object' and prop not instanceof Date and prop not instanceof RegExp
+      flatten_object(prop, into, prefix + key + sep, sep)
+    else
+      into[prefix + key] = prop
+  into
+  
 
 class Registry
   constructor: ->
@@ -27,9 +42,9 @@ class Registry
 class Worker extends EventEmitter
   @registry = new Registry()
   
-  @on: (queue, command, func) ->
+  @on: (command, func) ->
     o = {}
-    o["#{queue}:#{command}"] = func
+    o[command] = func
     @registry.register(o)
   
   constructor: (options = {}) ->
@@ -52,15 +67,20 @@ class Worker extends EventEmitter
     @_state = 'uninitialized'
     
     @_child_workers = []
+    @_all_children = []
+    
+    @_worker_heartbeat = new WorkerHeartbeat(@)
+    
+    @name = process.pid + new Date().getTime() + require('crypto').randomBytes(8).toString('hex')
   
   initialize: (callback) ->
     return unless @_state is 'uninitialized'
     @_state = 'initializing'
-    @emit @_state
+    @emit(@_state)
     
     async.map _.range(@_concurrent_commands), (idx, cb) ->
       start_child = (command, args) ->
-        log "Starting child #{command} #{args}"
+        log "Starting child #{command} #{args.join(' ')}"
         child = child_process.fork(command, args, {cwd: '.', env: process.env})
         child.on 'message', (msg) ->
           cb(null, child) if msg.status is 'ready'
@@ -72,15 +92,16 @@ class Worker extends EventEmitter
     , (err, children) =>
       return callback(err) if err?
       @_child_workers = children
+      @_all_children = children.slice(0)
       @_state = 'initialized'
       callback()
-      @emit @_state
+      @emit(@_state)
   
   next_queue: ->
     queues = @_queues
     @_current_queue = (@_current_queue + 1) % queues.length
     queue_name = queues[@_current_queue]
-    @_queue_cache[queue_name] ||= new Queue(queues[@current_queue])
+    @_queue_cache[queue_name] ||= new Queue(queues[@_current_queue])
   
   increase_timeout: ->
     c = Math.max(@_current_poll_timeout, @_min_poll_timeout)
@@ -98,7 +119,8 @@ class Worker extends EventEmitter
     
     worker = @_child_workers.shift()
 
-    @emit 'log', "Processing #{envelope.command}", envelope
+    @emit('log', "Processing #{envelope.command}", envelope)
+    @emit('work', envelope)
     status = {
       envelope: envelope
       worker: worker
@@ -122,8 +144,8 @@ class Worker extends EventEmitter
 
   success: (envelope) ->
     delete @_current_commands[envelope.id]
-    @emit 'success', {envelope: envelope}
     envelope.remove()
+    @emit('success', envelope)
   
   error: (err, envelope) ->
     delete @_current_commands[envelope.id]
@@ -132,10 +154,10 @@ class Worker extends EventEmitter
       envelope.remove()
 
     err = new Error(err) if typeof err is 'string'
-    @emit 'error', {error: err, envelope: envelope}
+    @emit('failure', err, envelope)
   
   no_envelope: ->
-    @emit 'log', 'Waiting for more commands'
+    @emit('log', 'Waiting for more commands')
     @increase_timeout()
   
   ready_for_next: ->
@@ -147,10 +169,10 @@ class Worker extends EventEmitter
   work: ->
     return unless @_state is 'running'
     return @next(@increase_timeout()) unless @ready_for_next()
-    
-    @emit 'work'
-    
-    @next_queue().pop (err, envelope) =>
+
+    queue = @next_queue()
+    log "Checking #{queue.name}"
+    queue.pop (err, envelope) =>
       if err?
         @error(err)
       else if not envelope?
@@ -170,6 +192,9 @@ class Worker extends EventEmitter
         log 'Waiting for initialization'
         @initialize (err) =>
           return callback?(err) if err?
+          @_state = 'running'
+          @emit @_state
+          @_worker_heartbeat.start()
           log "Initialized! Let's go!"
           process.nextTick(=> @next(1))
           callback?()
@@ -178,5 +203,62 @@ class Worker extends EventEmitter
   
   stop: (callback) ->
     @_state = 'stopping'
+  
+  info: (callback) ->
+    mem = process.memoryUsage()
+    o = {
+      name: @name
+      pid: process.pid
+      uptime: process.uptime()
+      config: {
+        queues: @_queues
+        min_timeout: @_min_poll_timeout
+        max_timeout: @_max_poll_timeout
+        concurrent_commands: @_concurrent_commands
+      }
+      stats: {
+        loadavg: os.loadavg()
+        resident_total: 0
+        os: {
+          free: pretty_mem(os.freemem())
+          total: pretty_mem(os.totalmem())
+          in_use: pretty_mem(os.totalmem() - os.freemem())
+        }
+        process: {
+          rss: pretty_mem(mem.rss)
+          heap_total: pretty_mem(mem.heapTotal)
+          heap_used: pretty_mem(mem.heapUsed)
+        }
+      }
+    }
+
+    async.map @_all_children, (c, cb) ->
+      procinfo.memory c.pid, (err, mem) ->
+        return cb(err) if err?
+        o.stats.resident_total += mem.resident
+        cb(null, procinfo.pretty_object(mem))
+    , (err, children) ->
+      return callback(err) if err?
+      o.stats.children = children
+      o.stats.resident_total = procinfo.pretty(o.stats.resident_total)
+      callback(null, o)
+  
+  @workers: (callback) ->
+    create_client().keys "#{settings.namespace}:worker:*", (err, keys) ->
+      return callback(err) if err?
+      callback(null, keys.map (k) -> k.slice("#{settings.namespace}:worker:".length))
+  
+  @stats: (callback) ->
+    client = create_client()
+
+    @workers (err, workers) ->
+      return callback(err) if err?
+      return callback(null, []) unless workers? and workers.length > 0
+      client.mget workers.map((w) -> "#{settings.namespace}:worker:#{w}"), (err, workers) ->
+        data = workers.map (w) ->
+          w = JSON.parse(w)
+          _.extend({type: 'worker', full_name: w.name}, flatten_object(w.stats))
+
+        callback(null, data)
   
 module.exports = Worker

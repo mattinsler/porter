@@ -1,22 +1,8 @@
-Queue = require('../index').Queue
+Queue = require './queue'
+Service = require './service'
 
-class Reaper
-  constructor: (@interval = 5000) ->
-  
-  start: ->
-    return if @interval_id
-    
-    @interval_id = setInterval(=>
-      @reap()
-    , @interval)
-    
-    @reap()
-  
-  stop: ->
-    clearInterval(@interval_id)
-    @interval_id = null
-  
-  reap: ->
+class Reaper extends Service
+  run: ->
     start = new Date()
     Queue.reap (err, count) ->
       end = new Date()

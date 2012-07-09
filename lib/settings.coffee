@@ -13,13 +13,13 @@ exports.redis = {
     
     redis = require 'redis'
     
-    url_config = require('url').parse(exports.url) if exports.url?
+    url_config = require('url').parse(exports.redis.url) if exports.redis.url?
     [url_username, url_password] = url_config.auth.split(':') if url_config?.auth?
     
-    host = url_config?.hostname || exports.host
-    port = url_config?.port || exports.port
-    username = url_username || exports.username
-    password = url_password || exports.password
+    host = url_config?.hostname || exports.redis.host
+    port = url_config?.port || exports.redis.port
+    username = url_username || exports.redis.username
+    password = url_password || exports.redis.password
     
     client = redis.createClient(port, host)
     client.auth(password) if password?

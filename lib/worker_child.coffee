@@ -1,5 +1,11 @@
 Worker = require './worker'
 
+# console.log = ->
+#   process.send {log: Array::slice.call(null, arguments)}
+
+
+
+
 log = ->
   arguments[0] = "[Worker Child #{process.pid}] #{arguments[0]}"
   console.log.apply(console, arguments)

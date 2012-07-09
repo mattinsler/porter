@@ -2,8 +2,8 @@ _ = require 'underscore'
 async = require 'async'
 crypto = require 'crypto'
 uuid = require 'node-uuid'
-settings = require './settings'
 
+settings = require './settings'
 create_client = settings.redis.create_client
 
 class Queue
@@ -35,6 +35,8 @@ class Queue
   stats_hash_name: (name, type) -> Queue.stats_hash_name(name, type, @_namespace)
 
   constructor: (queue_name, options = {}) ->
+    @name = queue_name
+    
     @_namespace = options.namespace || settings.namespace
     @_timeout = options.timeout || settings.timeout
     @_payload_storage = options.payload_storage || settings.payload_storage
@@ -116,14 +118,14 @@ class Queue
     create_client().llen @_work_queue_name, callback
   
   stats: (callback) ->
-    Queue.__stats__(create_client(), @_stats_hash_name, callback)
+    Queue.__stats__(@_stats_hash_name, callback)
   
   commands: (callback) ->
-    Queue.__commands__(create_client(), @stats_hash_name(@_base_queue_name, 'command') + ':*', @stats_hash_name(@_base_queue_name, 'command') + ':', callback)
+    Queue.__commands__(@stats_hash_name(@_base_queue_name, 'command') + ':*', @stats_hash_name(@_base_queue_name, 'command') + ':', callback)
   
   command_stats: (command, callback) ->
     command = "#{@_base_queue_name}:#{command}" unless command.indexOf(@_base_queue_name + ':') is 0
-    Queue.__stats__(create_client(), @stats_hash_name(command, 'command'), callback)
+    Queue.__stats__(@stats_hash_name(command, 'command'), callback)
   
   commands_stats: (callback) ->
     @commands (err, commands) =>
@@ -159,23 +161,26 @@ class Queue
   @__stats__: (search, callback) ->
     create_client().hgetall search, (err, stats) ->
       return callback(err) if err?
-      callback(null, {
-        count: stats?.count || 0
-        avg_time_on_queue: (stats?.queue_pop / stats?.count) || 0
-        avg_process_time: (stats?.pop_remove / stats?.count) || 0
-        avg_queue_to_completion: (stats?.queue_remove / stats?.count) || 0
-      })
+      stats = {} unless stats?
+      stats.count ?= 0
+      stats.queue_pop ?= 0
+      stats.pop_remove ?= 0
+      stats.queue_remove ?= 0
+      stats.avg_time_on_queue = if stats.count is 0 then 0 else stats.queue_pop / stats.count
+      stats.avg_process_time = if stats.count is 0 then 0 else stats.pop_remove / stats.count
+      stats.avg_queue_to_completion = if stats.count is 0 then 0 else stats.queue_remove / stats.count
+      callback(null, stats)
   
   @__commands__: (search, prefix_to_remove, callback) ->
     create_client().keys search, (err, commands) ->
       return callback(err) if err?
-      callback(null, commands.map (q) -> q.replace(new RegExp("^#{prefix_to_remove}"), ''))
+      callback(null, commands.map (q) -> q.slice(prefix_to_remove.length))
   
   @commands: (callback) ->
     Queue.__commands__("#{settings.namespace}:s:c:*", "#{settings.namespace}:s:c:", callback)
 
   @command_stats: (command, callback) ->
-    Queue.__stats__(command, callback)
+    Queue.__stats__("#{settings.namespace}:s:c:#{command}", callback)
   
   @queues: (callback) ->
     client = create_client()
@@ -185,31 +190,55 @@ class Queue
       stats_queues: (cb) -> client.keys("#{settings.namespace}:s:q:*", cb)
     }, (err, data) ->
       return callback(err) if err?
-      queues = data.queues.map (q) -> q.replace(new RegExp("^#{settings.namespace}:q:"), '')
-      work_queues = data.work_queues.map (q) -> q.replace(new RegExp("^#{settings.namespace}:w:"), '')
-      stats_queues = data.stats_queues.map (q) -> q.replace(new RegExp("^#{settings.namespace}:s:q:"), '')
+      queues = data.queues.map (q) -> q.slice("#{settings.namespace}:q:".length)
+      work_queues = data.work_queues.map (q) -> q.slice("#{settings.namespace}:w:".length)
+      stats_queues = data.stats_queues.map (q) -> q.slice("#{settings.namespace}:s:q:".length)
       callback(null, _(queues).union(work_queues, stats_queues))
-  
-  @queue_stats: (callback) ->
-    Queue.queues (err, queues) ->
+
+  @stats: (callback) ->
+    @queues (err, queues) ->
       return callback(err) if err?
-      async.parallel _(queues).inject(((o, q) ->
+      async.parallel _(queues).inject((o, q) ->
         queue = new Queue(q)
-        o[q] = (cb) -> queue.stats(cb)
-        o["count-#{q}"] = (cb) -> queue.count(cb)
-        o["work_count-#{q}"] = (cb) -> queue.work_count(cb)
+        o["#{q}-stats"] = (cb) -> queue.stats(cb)
+        o["#{q}-count"] = (cb) -> queue.count(cb)
+        o["#{q}-work-count"] = (cb) -> queue.work_count(cb)
         o
-      ), {}), (err, data) ->
+      , {}), (err, data) ->
         return callback(err) if err?
-        callback(null, _(queues).inject ((o, q) ->
+        callback(null, _(queues).inject (o, q) ->
           o[q] = {
+            type: 'queue'
             name: q
-            queued: data["count-#{q}"]
-            in_progress: data["work_count-#{q}"]
-            stats: data[q]
+            full_name: q
+            queue: q
+            queued: data["#{q}-count"]
+            in_progress: data["#{q}-work-count"]
+            stats: data["#{q}-stats"]
           }
           o
-        ), {})
+        , {})
+  
+  @commands_stats: (callback) ->
+    @commands (err, commands) ->
+      return callback(err) if err?
+      async.parallel _(commands).inject((o, c) ->
+        o[c] = (cb) -> Queue.command_stats(c, cb)
+        o
+      , {}), (err, data) ->
+        return callback(err) if err?
+        callback(null, _(commands).inject (o, c) ->
+          [queue, command] = c.split(':')
+          o[c] = {
+            type: 'command'
+            name: command
+            full_name: c
+            queue: queue
+            command: command
+            stats: data[c]
+          }
+          o
+        , {})
   
   @__reap__: (lock_name, queue_name, work_queue_name, callback) ->
     client = create_client()
@@ -230,7 +259,7 @@ class Queue
                   cb()
   
   @reap: (callback) ->
-    Queue.queues (err, queues) ->
+    @queues (err, queues) ->
       return callback?(err) if err?
       return callback?(null, 0) if queues.length is 0
       async.parallel queues.map((q) ->
