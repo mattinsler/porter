@@ -19,6 +19,7 @@ exports.load = (id, callback) ->
     callback(null, JSON.parse(envelope))
 
 exports.load_many = (ids, callback) ->
+  return process.nextTick(-> callback(null, [])) if ids.length is 0
   client().mget ids, (err, envelopes) ->
     return callback(err) if err?
     callback(null, envelopes.map (e) -> JSON.parse(e))
