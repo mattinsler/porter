@@ -1,6 +1,6 @@
 # Porter
 
-  Porter is a reliable queueing system built on [redis](http://redis.io) for use at [PageLever](http://pagelever.com).
+  Porter is a job queue system built on [redis](http://redis.io) for use at [PageLever](http://pagelever.com).
 
 ## Installation
 
