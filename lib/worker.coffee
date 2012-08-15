@@ -51,9 +51,9 @@ class Worker extends EventEmitter
     @_is_child = process.send?
     
     @_queue_cache = {}
-    @_queues = options.queues || settings.queues
-    Object.defineProperty @, '_queues', {get: -> Worker.registry.queues()} unless @_queues?
-
+    @_queues = options.queues || settings.worker.queues
+    Object.defineProperty(@, '_queues', {get: -> Worker.registry.queues()}) unless @_queues?
+    
     @_min_poll_timeout = options.min_poll_timeout || settings.worker.min_poll_timeout
     @_max_poll_timeout = options.max_poll_timeout || settings.worker.max_poll_timeout
     @_concurrent_commands = options.concurrent_commands || settings.worker.concurrent_commands
