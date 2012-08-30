@@ -7,6 +7,12 @@ exports.type = 'redis'
 exports.store = (envelope, callback) ->
   client().set(envelope.id, JSON.stringify(envelope), callback)
 
+exports.store_many = (envelopes, callback) ->
+  values = []
+  for e in envelopes
+    values.push(e.id, JSON.stringify(e))
+  client().mset(values, callback)
+
 exports.remove = (id, callback) ->
   client().del(id, callback)
   
