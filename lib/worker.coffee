@@ -212,6 +212,7 @@ class Worker extends EventEmitter
     @_state = 'graceful'
 
   graceful_stop: () ->
+    _.map(@_child_workers, (w) -> w.kill('SIGHUP'))
     process.exit(0)
 
   ready_for_graceful: () ->
