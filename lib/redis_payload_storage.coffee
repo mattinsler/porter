@@ -15,10 +15,10 @@ exports.store_many = (envelopes, callback) ->
 
 exports.remove = (id, callback) ->
   client().del(id, callback)
-  
+
 exports.remove_many = (ids, callback) ->
   client().del(ids, callback)
-  
+
 exports.load = (id, callback) ->
   client().get id, (err, envelope) ->
     return callback(err) if err?
