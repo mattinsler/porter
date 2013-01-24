@@ -130,7 +130,9 @@ class Worker extends EventEmitter
     on_message = (msg) =>
       if msg.status is 'error'
         @_child_workers.push(status.worker)
-        @error(msg.error, envelope)
+        # create a fake error and overwrite it otherwise msg.error is just a json object
+        e = new Error()
+        @error(_(e).extend(msg.error), envelope)
         # child.kill()
       else if msg.status is 'success'
         @_child_workers.push(status.worker)
