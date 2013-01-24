@@ -1,17 +1,20 @@
+traverse = require 'traverse'
 Worker = require './worker'
 
 # console.log = ->
 #   process.send {log: Array::slice.call(null, arguments)}
 
 
-
+remove_circular = (obj) ->
+  traverse(obj).map ->
+    @remove() if @circular
 
 log = ->
   arguments[0] = "[Worker Child #{process.pid}] #{arguments[0]}"
   console.log.apply(console, arguments)
 
 error = (err) ->
-  process.send {status: 'error', error: err.stack}
+  process.send {status: 'error', error: remove_circular(err)}
 
 success = ->
   process.send {status: 'success'}
