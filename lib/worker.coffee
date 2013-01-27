@@ -210,6 +210,7 @@ class Worker extends EventEmitter
 
   graceful: (callback) ->
     @_state = 'graceful'
+    callback?()
 
   graceful_stop: () ->
     _.map(@_child_workers, (w) -> w.kill('SIGHUP'))
