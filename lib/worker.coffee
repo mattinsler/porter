@@ -205,12 +205,11 @@ class Worker extends EventEmitter
       when 'initializing'
         @.once('initialized', -> callback?())
 
-  stop: (callback) ->
+  stop: () ->
     @_state = 'stopping'
 
   graceful: (callback) ->
     @_state = 'graceful'
-    @_graceful_callback = callback if callback?
 
   graceful_stop: () ->
     _.map(@_child_workers, (w) -> w.kill('SIGHUP'))
